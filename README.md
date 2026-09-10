@@ -12,13 +12,13 @@ In this phase, I focus on implementing a platform to execute data transformation
 
 #### TODO:
 
-[+] Define 4 reference programs, with proper encoding scheme and error schematics.
-[-] Implement reference programs (3/4).
-[-] Implement host program:
-    [+] Implement program's executor, with input/output handling.
-    [-] Implement execution trace.
-    [+] Implement testing data.
-[+] Test the deterministic of reference programs.
+[x] Define 4 reference programs, with proper encoding scheme and error schematics.
+[] Implement reference programs (3/4).
+[] Implement host program:
+    [x] Implement program's executor, with input/output handling.
+    [] Implement execution trace.
+    [x] Implement testing data.
+[x] Test the deterministic of reference programs.
 
 ---
 
