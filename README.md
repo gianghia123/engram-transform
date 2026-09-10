@@ -10,16 +10,6 @@ Currently, it is in Phase 0 (Deterministic executor).
 
 In this phase, I focus on implementing a platform to execute data transformation algorithms, with 4 reference programs: `count`, `filter`, `histogram`, and `checksum`. Each of these programs is defined through a specification, written in `engram/Spec.md`. Implementations are written in Rust, compiled to WASM, and executed through a host program written in Python. All of the programs must be deterministically executed. The programs must be run according to a fuel budget, and automatically halted if exceed its budget. Programs also left an execution trace, which ultimately decide whether or not they are deterministic.
 
-#### TODO:
-
-- [x] Define 4 reference programs, with proper encoding scheme and error schematics.
-- [ ] Implement reference programs (3/4).
-- [ ] Implement host program:
-    - [x] Implement program's executor, with input/output handling.
-    - [ ] Implement execution trace.
-    - [x] Implement testing data.
-- [x] Test the deterministic of reference programs.
-
 ---
 
 ## Structure
