@@ -1,0 +1,16 @@
+[package]
+name = "checksum"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib"]   # produces a standalone .wasm exporting alloc/run
+
+[dependencies]
+engram-shared = { path = "../../shared" }
+ark-bn254.workspace = true
+ark-ff.workspace = true
+
+[profile.release]
+panic = "abort"
+lto = true
+opt-level = "z"

@@ -1,0 +1,9 @@
+[package]
+name = "engram-shared"
+edition = "2024"
+
+[lib]
+crate-type = ["rlib"]   # normal Rust library — linked into each program crate
+
+[dependencies]
+dlmalloc.workspace = true
