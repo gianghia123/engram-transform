@@ -336,7 +336,7 @@ pub extern "C" fn run(
     input_len: u32,
     params_ptr: u32,
     params_len: u32,
-    _out_ptr: u32,
+    out_ptr: u32,
     _out_len_ptr: u32,
 ) -> i32 {
     // ---- Parameter parsing (Spec.md §6, 5 bytes total) ----
@@ -378,6 +378,7 @@ pub extern "C" fn run(
         }
         let num_full_block = input_len / 31;
         let padding: u32 = input_len % 31;
+        
         for indx in 0..num_full_block {
             unsafe {
                 let current_block_ptr = input_ptr + (indx * 31);
@@ -416,7 +417,84 @@ pub extern "C" fn run(
                 }
             }
         }
+        
+        unsafe {
+            let output_slice = core::slice::from_raw_parts_mut(out_ptr as *mut u8, 32);
+            let hash_slice = core::slice::from_raw_parts(hash_result_ptr as *const u8, 32);
+            output_slice.copy_from_slice(&hash_slice);
+        } 
     }
+    else {
+       // ---- Merkleization (Spec.md §6, steps 1, 3-4) ----
+        let num_full_block = input_len / 31;
+        let padding: u32 = input_len % 31;
+        let num_chunks = if padding > 0 { num_full_block + 1 } else { num_full_block };
+
+        // Not specified by Spec.md what an empty blob's root should be —
+        // rejecting for now rather than guessing a convention.
+        if num_chunks == 0 {
+            return E_MALFORMED_INPUT;
+        }
     
+        // Step 1: decode every 31-byte chunk into a field element. Last chunk
+        // is PKCS#7-padded if short. This is the bottom level of the tree.
+        let mut level: Vec<Fr> = Vec::with_capacity(num_chunks as usize);
+        for indx in 0..num_full_block {
+            unsafe {
+                let block_ptr = input_ptr + (indx * 31);
+                let block = core::slice::from_raw_parts(block_ptr as *const u8, 31);
+                level.push(Fr::from_be_bytes_mod_order(block));
+            }
+        }
+        if padding > 0 {
+            unsafe {
+                let block_ptr = input_ptr + (num_full_block * 31);
+                let block_slice = core::slice::from_raw_parts(block_ptr as *const u8, padding as usize);
+                let padded: [u8; 31] = pkcs7_pad(block_slice);
+                level.push(Fr::from_be_bytes_mod_order(&padded));
+            }
+        }
+    
+        // Steps 3-4: fold the level upward. At every level — chunk level and
+        // internal levels alike — a leftover odd node is promoted unchanged
+        // to the next level rather than hashed or zero-padded.
+        let hash_buf_ptr: u32 = alloc(96);
+    
+        while level.len() > 1 {
+            let mut next_level: Vec<Fr> = Vec::with_capacity((level.len() + 1) / 2);
+            let mut indx = 0usize;
+            while indx + 1 < level.len() {
+                let left = level[indx];
+                let right = level[indx + 1];
+                // State layout mirrors the checksum sponge: index 0 is the
+                // capacity/output slot (zeroed before each compression),
+                // indices 1-2 are the rate, carrying (left, right) in.
+                let parent = unsafe {
+                    let state = core::slice::from_raw_parts_mut(hash_buf_ptr as *mut u8, 96);
+                    state[0..32].fill(0);
+                    state[32..64].copy_from_slice(&BigInt::from(left).to_bytes_be());
+                    state[64..96].copy_from_slice(&BigInt::from(right).to_bytes_be());
+                    match poseidon_one_pass(hash_buf_ptr, 96, hash_buf_ptr) {
+                        Ok(()) => {}
+                        Err(()) => return E_INVALID_PARAM,
+                    }
+                    Fr::from_be_bytes_mod_order(&state[0..32])
+                };
+                next_level.push(parent);
+                indx += 2;
+            }
+            if indx < level.len() {
+                // Odd leftover node: promoted as-is, no hashing.
+                next_level.push(level[indx]);
+            }
+            level = next_level;
+        }
+
+        unsafe {
+            let output_slice = core::slice::from_raw_parts_mut(out_ptr as *mut u8, 32);
+            let root_bigint = BigInt::from(level[0]);
+            output_slice.copy_from_slice(&root_bigint.to_bytes_be());
+        }      
+    }
     return E_OK;
 }

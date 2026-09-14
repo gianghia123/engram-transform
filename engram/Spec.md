@@ -139,7 +139,7 @@ record_width = field_offset + field_width
 
 1. Divide the bytes into chunks of 31-byte length, and convert those chunks into elements of the scalar field $F_{p}$, big-endian. If any chunk is shorter than 31 bytes, padding using PCKS#7 padding scheme.
 2. If `is_merkle = 0`, construct a Poseidon sponge hash, with states being input being 1 chunk.
-3. If `is_merkle = 1`, each 2 consecutive chunks is a leaf of the Merkle tree. If a leaf does not have enough chunk, use 0-filled chunks. If there is a single node in any level, bump it to the next level on the tree (i.e. the parent of that node contain the value of itself.)
+3. If `is_merkle = 1`, each 2 consecutive chunks is a leaf of the Merkle tree. If there is a single node in any level, bump it to the next level on the tree (i.e. the parent of that node contain the value of itself.). If any leaf has 1 element, bump it to the next level as-is.
 
 **Output**: `root: 32 bytes` represent either a checksum of the blob, or the root of the Merkle tree.
 
