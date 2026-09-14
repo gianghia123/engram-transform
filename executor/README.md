@@ -8,7 +8,8 @@ Written against `wasmtime` 48 (installed in `.venv`).
 ```sh
 uv run executor <program> --input <file> --params <params.bin> \
                 [--input-format NAME] [--output-format NAME] \
-                [--out-dir DIR] [--fuel N] [--wasm-dir DIR]
+                [--out-dir DIR] [--fuel N] [--mem N] [--wasm-dir DIR] \
+                [--trace-db PATH]
 uv run executor --list-formats   # show available formats
 # or, without uv:
 .venv/bin/executor count --input in.pkl --params count.params
@@ -27,9 +28,14 @@ uv run executor --list-formats   # show available formats
 * `--out-dir` — where the output format writes (default `.`).
 * `--fuel` — deterministic per-run fuel budget (default `1000000000`). Lower it
   to exercise `E_FUEL_EXHAUSTED` deterministically.
+* `--mem` — guest linear-memory limit in bytes (default `5242880`, i.e. 5 MiB),
+  set via `store.set_limits(memory_size=...)`. Lower it to exercise
+  dlmalloc/`memory.grow` failures deterministically.
 * `--wasm-dir` — guest wasm directory or a direct `.wasm` path. Default lookup:
   `guest_program/target/wasm32-unknown-unknown/{debug,release}/<program>.wasm`
   (debug first — plain `cargo build` in `guest_program/` refreshes it).
+* `--trace-db` — SQLite path to append one `Trace` row per run. Default:
+  `<out-dir>/traces.db`. See [Tracing](#tracing).
 
 The wasm guest is loaded from `guest_program/target/...`; build it with
 `cargo build -p count` (etc.) from `../guest_program`.
@@ -46,16 +52,42 @@ The wasm guest is loaded from `guest_program/target/...`; build it with
 ## Host guarantees (Spec.md §0)
 
 * Deterministic fuel: `Config.consume_fuel = True` + `store.set_fuel(fuel)`.
+* Deterministic memory limit: `store.set_limits(memory_size=mem)`.
 * No ambient capabilities: SIMD/threads/shared-memory/memory64/GC/component
   model/exceptions/tail-call/etc. disabled; **no WASI and no host imports are
   ever provided** — instantiation fails closed if the module imports anything.
 * One fresh `Store` per run — no state, heap, or fuel carried between jobs.
 
+## Tracing
+
+Every `execute()` run appends one row to the `traces` table in the SQLite DB
+at `<out-dir>/traces.db` (override with `--trace-db`). This includes **failed**
+runs: a guest error (Spec.md §1 code) or a fuel-exhaustion trap is recorded
+with that code in the `trap` column. A host-side failure (exit 64),
+such as a wasm image that traps `unreachable`, is not traced — there is no Spec
+error code for it.
+
+| column | type | value |
+| --- | --- | --- |
+| `job_id` | TEXT | `sha256(program ‖ input_digest ‖ params_digest)` — Phase 0 provisional binding (RQ1) |
+| `program_hash` | TEXT | `sha256` of the guest `.wasm` binary |
+| `input_digest` | TEXT | `sha256` of the decoded input blob |
+| `params_digest` | TEXT | `sha256` of the raw spec params blob |
+| `fuel_consumed` | INTEGER | `initial_fuel − store.get_fuel()` |
+| `output_digest` | TEXT | `sha256` of the guest output (`sha256("")` on failure) |
+| `trap` | INTEGER | `0` on success; Spec.md error code on failure |
+
+The handler lives in `src/executor/log.py` (`Trace`, `DatabaseHandler`).
+`job_id` is a forward-compatible stand-in that will be replaced by the Phase 1
+`JobID = H(InputRoot ‖ InputVersion ‖ ProgramHash ‖ ParameterHash ‖
+PartitionRoot)`; keep the hash inputs canonical (BE packed, version byte) so
+recorded digests stay reproducible.
+
 ## Pluggable I/O formats
 
-`src/executor/engine.py` never touches files except reading the params blob;
-input decoding and result writing live behind two base classes in
-`src/executor/formats/base.py`:
+`src/executor/engine.py` never touches files except reading the params blob and
+emitting traces; input decoding and result writing live behind two base classes
+in `src/executor/formats/base.py`:
 
 * `InputFormat` — `load(self, path, *, program, params) -> bytes` returns the
   exact input blob for the guest (context is passed so a format can encode
@@ -90,6 +122,17 @@ Then: `uv run executor count --input in.pkl --params count.params --output-forma
 
 ## Making test files
 
+`make_test_data.py` generates the Spec.md §7 datasets (as pickle-wrapped raw
+bytes) plus per-program params into `src/data/`:
+
+```sh
+.venv/bin/python make_test_data.py   # writes src/data/ (created if absent)
+.venv/bin/executor count --input src/data/synthetic_integer_records.pkl \
+                 --params src/data/count.params --out-dir out/
+```
+
+Manual equivalent:
+
 ```python
 import pickle, struct
 
@@ -117,9 +160,10 @@ The host stages params + input + output + a 4-byte length slot in guest
 linear memory. The guest allocates from `dlmalloc` (see `guest_program/shared`),
 which grows the wasm memory on demand, so there is no fixed capacity to size
 by hand: filter copies matched records straight into the host-provided out
-region, and histogram allocates its bin table on the heap inside `run`. Only
-a **failed** allocation traps (`unreachable`) — e.g. a truly huge input that
-exhausts the process memory — and the executor prints a hint.
+region, and histogram allocates its bin table on the heap inside `run`. Memory
+growth is bounded by `--mem`; a **failed** allocation traps (`unreachable`)
+when the limit is hit — e.g. a huge input or a too-small `--mem` — and the
+executor prints a hint.
 
 ## ABI (what the host calls)
 

@@ -59,6 +59,14 @@ def main(argv: list[str] | None = None) -> None:
     )
     parser.add_argument("--out-dir", type=Path, default=Path("."), help="output directory (default: .)")
     parser.add_argument("--fuel", type=int, default=1_000_000_000, help="deterministic fuel budget")
+    parser.add_argument("--mem", type=int, default=5_242_880, help="memory budget in bytes")
+    parser.add_argument(
+        "--trace-db",
+        type=Path,
+        default=None,
+        help="SQLite path to append a Trace row per run (default: "
+        "<out-dir>/traces.db)",
+    )
     parser.add_argument(
         "--wasm-dir",
         type=Path,
@@ -91,14 +99,18 @@ def main(argv: list[str] | None = None) -> None:
     if args.fuel < 0:
         parser.error("--fuel must be >= 0")
 
+    trace_db = args.trace_db if args.trace_db is not None else args.out_dir / "traces.db"
+
     try:
         result = execute(
             program=args.program,
             input_path=args.input,
             params_path=args.params,
             fuel=args.fuel,
+            mem_limit=args.mem,
             wasm_dir=args.wasm_dir,
             input_format=args.input_format,
+            trace_db=trace_db,
         )
         out_path = OutputFormat.get(args.output_format)().write(result, args.out_dir)
     except GuestError as exc:

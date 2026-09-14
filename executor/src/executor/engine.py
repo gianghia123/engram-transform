@@ -25,11 +25,14 @@ Output length handling (uniform guest ABI, agreed 2026-09):
 
 from __future__ import annotations
 
+import hashlib
+import logging
 from pathlib import Path
 
 import wasmtime as wasm
 
 from .formats import InputFormat, RunResult
+from .log import DatabaseHandler, Trace
 
 __all__ = ["ExecutorError", "GuestError", "execute", "PARAM_SIZES", "ERROR_NAMES"]
 
@@ -69,6 +72,8 @@ _FILTER = "filter"
 # the same E_FUEL_EXHAUSTED behavior). Lower it with --fuel to exercise
 # exhaustion deterministically.
 DEFAULT_FUEL = 1_000_000_000
+# And also sum budget for memory
+DEFAULT_MEM = 5_242_880
 
 # Histogram num_bins is BE u32 at param offset 11; spec max is 65535.
 _HIST_NUM_BINS_OFFSET = 11
@@ -180,13 +185,76 @@ def _check_sandbox(module: wasm.Module) -> None:
         )
 
 
+# Trace persistence: one DatabaseHandler per DB path, attached to a dedicated
+# logger so Trace rows are written without touching the app's normal logging.
+_TRACE_LOGGER = logging.getLogger("executor.trace")
+_TRACE_LOGGER.setLevel(logging.INFO)
+_TRACE_LOGGER.propagate = False
+_TRACE_HANDLERS: dict[str, DatabaseHandler] = {}
+
+
+def _digest(b: bytes) -> str:
+    return hashlib.sha256(b).hexdigest()
+
+
+def _ensure_trace_db(path: str) -> DatabaseHandler:
+    handler = _TRACE_HANDLERS.get(path)
+    if handler is None:
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        handler = DatabaseHandler(path)
+        _TRACE_HANDLERS[path] = handler
+        _TRACE_LOGGER.addHandler(handler)
+    return handler
+
+
+def _build_trace(
+    program: str,
+    wasm_path: Path,
+    input_data: bytes,
+    params: bytes,
+    output: bytes,
+    fuel_consumed: int,
+    trap: int,
+) -> Trace:
+    program_hash = _digest(wasm_path.read_bytes())
+    input_digest = _digest(input_data)
+    params_digest = _digest(params)
+    output_digest = _digest(output)
+    return Trace(
+        job_id=_digest(program.encode() + input_digest.encode() + params_digest.encode()),
+        program_hash=program_hash,
+        input_digest=input_digest,
+        params_digest=params_digest,
+        fuel_consumed=fuel_consumed,
+        output_digest=output_digest,
+        trap=trap,
+    )
+
+
+def _record_trace(trace_db: Path, trace: Trace) -> None:
+    _ensure_trace_db(str(trace_db))
+    _TRACE_LOGGER.info(trace)
+
+
+def _emit_failure_trace(trace_db, program, wasm_path, input_data, params, fuel, trap, store):
+    if trace_db is None:
+        return
+    trace = _build_trace(
+        program, wasm_path, input_data, params, b"",
+        fuel_consumed=fuel - store.get_fuel(), trap=trap,
+    )
+    _record_trace(trace_db, trace)
+
+
 def execute(
     program: str,
     input_path: Path,
     params_path: Path,
     fuel: int = DEFAULT_FUEL,
+    mem_limit: int = DEFAULT_MEM,
     wasm_dir: Path | None = None,
     input_format: str = "pickle-bytes",
+    trace_db: Path | None = None,
 ) -> RunResult:
     """Run one guest job and return its raw result (nothing is written).
 
@@ -226,6 +294,7 @@ def execute(
     # jobs, guest memory (and thus the dlmalloc heap) starts clean.
     store = wasm.Store(engine)
     store.set_fuel(fuel)
+    store.set_limits(memory_size=mem_limit)
     try:
         instance = wasm.Instance(store, module, [])
     except (wasm.WasmtimeError, wasm.Trap) as exc:
@@ -260,6 +329,9 @@ def execute(
     except wasm.Trap as trap:
         code = trap.trap_code
         if code == wasm.TrapCode.OUT_OF_FUEL:
+            _emit_failure_trace(
+                trace_db, program, wasm_path, input_data, params, fuel, 1, store
+            )
             raise GuestError(1, "E_FUEL_EXHAUSTED: guest ran out of fuel") from trap
         hint = ""
         if code == wasm.TrapCode.UNREACHABLE and out_cap > 0:
@@ -275,6 +347,9 @@ def execute(
     ret = int(ret)
     if ret != 0:
         name = ERROR_NAMES.get(ret, "E_UNKNOWN")
+        _emit_failure_trace(
+            trace_db, program, wasm_path, input_data, params, fuel, ret, store
+        )
         raise GuestError(ret, f"guest returned {name} ({ret})")
 
     # ---- Read back the output ----
@@ -285,5 +360,12 @@ def execute(
             f"capacity {out_cap} — corrupted guest or ABI mismatch"
         )
     output = bytes(mem.read(store, out_ptr, out_ptr + out_len))
+
+    if trace_db is not None:
+        trace = _build_trace(
+            program, wasm_path, input_data, params, output,
+            fuel_consumed=fuel - store.get_fuel(), trap=0,
+        )
+        _record_trace(trace_db, trace)
 
     return RunResult(program=program, params=params, output=output)
