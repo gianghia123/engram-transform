@@ -1,27 +1,7 @@
-#![no_std]
-extern crate alloc;
-
-use alloc::vec::Vec;
-use ark_bn254::{Fr, FrConfig};
-use ark_ff::{BigInt, Field, Fp, MontBackend, MontFp, PrimeField, Zero, BigInteger};
-use engram_shared::{error::*, heap, Cursor};
-
-// The host stages params/input/output through the exported `alloc`, which is
-// dlmalloc-backed (linear memory grows on demand — no fixed capacity to
-// size). The Merkle builder will allocate its per-level hash buffers from
-// the same heap once the Poseidon backend is implemented.
-#[unsafe(export_name = "alloc")]
-pub extern "C" fn alloc(size: u32) -> u32 {
-    heap::alloc(size)
-}
-
-// Free a staging buffer previously returned by `alloc`. The executor creates
-// a fresh instance per run, so nothing calls this yet.
-#[unsafe(export_name = "dealloc")]
-pub extern "C" fn dealloc(ptr: u32, size: u32) {
-    heap::dealloc(ptr, size)
-}
-
+Params: n=254, t=3, alpha=5, M=128, R_F=8, R_P=56
+Modulus = 21888242871839275222246405745257275088696311157297823662689037894645226208583
+Number of S-boxes: 80
+Number of round constants: 192
 pub const ROUND_CONSTANTS: [Fr; 192] = [
     MontFp!("0x1d066a255517b7fd8bddd3a93f7804ef7f8fcde48bb4c37a59a09a1a97052816"),
     MontFp!("0x29daefb55f6f2dc6ac3f089cebcc6120b7c6fef31367b68eb7238547d32c1610"),
@@ -216,207 +196,19 @@ pub const ROUND_CONSTANTS: [Fr; 192] = [
     MontFp!("0x2760f6b6590a73a863f9bd30d8cb6002d195fa252b0cd84f36d3955e853b3592"),
     MontFp!("0x14aa7543a56c144a6fa53cb6d2e0537c2c65b571104def5a67d6f228492c2c5b"),
 ];
- pub const MDS_MATRIX: [[Fr; 3]; 3] = [
+n: 254
+t: 3
+N: 762
+Result Algorithm 1:
+[True, 0]
+Result Algorithm 2:
+[True, None]
+Result Algorithm 3:
+[True, None]
+Prime number: 0x30644e72e131a029b85045b68181585d97816a916871ca8d3c208c16d87cfd47
+MDS matrix:
+pub const MDS_MATRIX: [[Fr; 3]; 3] = [
     [MontFp!("0x08839af91040661d88438f506cfb1158bad2c1194ed8d9edc6daffddceb03640"), MontFp!("0x2b4818de7150d505bc7419a2e9174fc3308780492843ad0e4282f67754712c5b"), MontFp!("0x29fde99b8b86ab7c5c26bf594b23378ffcf1d58e06a5380adca08a2c7a922856")],
     [MontFp!("0x05e80b8117ef7990abad0f1c04c0d2672b8ef2c5782ccfb515fdb140943a4191"), MontFp!("0x1612fe911fa09cf282de92a7470faf266839c0a05f99525e952cc7105b054b6d"), MontFp!("0x19794c9c98d0c696c10abe4b3e6755891f92218ca1deb0d293ac27bc793f6b6b")],
     [MontFp!("0x28cbc5ccb9468e72c9a93e39438cd0d2101d2720c3d796d4a5e25e3e986f178b"), MontFp!("0x0d50774240a9f560ee85bc3cbacb200de7bbe1dbee378dcf9388d677efb69b74"), MontFp!("0x18092553cfdffa71625c676e0af6f3bd8e0107fa4b7c5e459f40432c525c5ba5")]
 ];
-
-fn pkcs7_pad(data: &[u8]) -> [u8; 31] {
-    let pad_len = (31 - data.len()) as u8; // always in 1..=31
-    let mut out = [0u8; 31];
-    out[..data.len()].copy_from_slice(data);
-    out[data.len()..].fill(pad_len);
-    return out;
-}
-extern "C" fn poseidon_one_pass(
-    data_ptr: u32,
-    data_len: u32,
-    output_ptr: u32
-) -> Result<(), ()> {
-    if data_len != 96 {
-        return Err(());
-    }
-    let mut internal_state = [Zero::zero(); 3];
-    unsafe {
-        for index in 0..3 {
-            let val_start_ptr: *const u8 = (data_ptr + (index * 32) as u32) as *const u8;
-            let chunk: &[u8] = core::slice::from_raw_parts(val_start_ptr, 31);
-            let elt = Fr::from_be_bytes_mod_order(chunk);
-            internal_state[index] = elt;
-        }
-    }
-
-    let r_f: u8 = 8;
-    let r_p: u8 = 56;
-    let round_constant_index: usize = 0;
-
-    for _ in 0..r_f / 2 {
-        // Add round constants & s-box
-        for indx in 0..3 {
-            internal_state[indx] += ROUND_CONSTANTS[round_constant_index];
-            internal_state[indx] = internal_state[indx].pow([5u64]);
-        }
-        // Mix layer
-        let ele0 = internal_state[0] * MDS_MATRIX[0][0]
-            + internal_state[1] * MDS_MATRIX[1][0]
-            + internal_state[2] * MDS_MATRIX[2][0];
-        let ele1 = internal_state[0] * MDS_MATRIX[0][1]
-            + internal_state[1] * MDS_MATRIX[1][1]
-            + internal_state[2] * MDS_MATRIX[2][1];
-        let ele2 = internal_state[0] * MDS_MATRIX[0][2]
-            + internal_state[1] * MDS_MATRIX[1][2]
-            + internal_state[2] * MDS_MATRIX[2][2];
-        internal_state[0] = ele0;
-        internal_state[1] = ele1;
-        internal_state[2] = ele2;
-    }
-
-    for _ in 0..r_p {
-        // Add round constants & s-box
-        for indx in 0..3 {
-            internal_state[indx] += ROUND_CONSTANTS[round_constant_index];
-        }
-        internal_state[2] = internal_state[2].pow([5u64]);
-        // Mix layer
-        let ele0 = internal_state[0] * MDS_MATRIX[0][0]
-            + internal_state[1] * MDS_MATRIX[1][0]
-            + internal_state[2] * MDS_MATRIX[2][0];
-        let ele1 = internal_state[0] * MDS_MATRIX[0][1]
-            + internal_state[1] * MDS_MATRIX[1][1]
-            + internal_state[2] * MDS_MATRIX[2][1];
-        let ele2 = internal_state[0] * MDS_MATRIX[0][2]
-            + internal_state[1] * MDS_MATRIX[1][2]
-            + internal_state[2] * MDS_MATRIX[2][2];
-        internal_state[0] = ele0;
-        internal_state[1] = ele1;
-        internal_state[2] = ele2;
-    }
-
-    for _ in 0..r_f / 2 {
-        // Add round constants & s-box
-        for indx in 0..3 {
-            internal_state[indx] += ROUND_CONSTANTS[round_constant_index];
-            internal_state[indx] = internal_state[indx].pow([5u64]);
-        }
-        // Mix layer
-        let ele0 = internal_state[0] * MDS_MATRIX[0][0]
-            + internal_state[1] * MDS_MATRIX[1][0]
-            + internal_state[2] * MDS_MATRIX[2][0];
-        let ele1 = internal_state[0] * MDS_MATRIX[0][1]
-            + internal_state[1] * MDS_MATRIX[1][1]
-            + internal_state[2] * MDS_MATRIX[2][1];
-        let ele2 = internal_state[0] * MDS_MATRIX[0][2]
-            + internal_state[1] * MDS_MATRIX[1][2]
-            + internal_state[2] * MDS_MATRIX[2][2];
-        internal_state[0] = ele0;
-        internal_state[1] = ele1;
-        internal_state[2] = ele2;
-    }
-
-    unsafe {
-        let mut block = core::slice::from_raw_parts_mut(output_ptr as *mut u8, 96);
-        let ele0 = BigInt::from(internal_state[0]);
-        let ele1 = BigInt::from(internal_state[1]);
-        let ele2 = BigInt::from(internal_state[2]);
-        block[0..32].copy_from_slice(&ele0.to_bytes_be());
-        block[32..64].copy_from_slice(&ele1.to_bytes_be());
-        block[64..96].copy_from_slice(&ele2.to_bytes_be());
-    }
-
-    return Ok(());
-}
-
-
-#[unsafe(export_name = "run")]
-// _input_ptr/_input_len/_out_ptr/_out_len_ptr: the uniform 6-arg ABI is kept
-// for host dispatch, but only the params are consumed by this stage.
-pub extern "C" fn run(
-    input_ptr: u32,
-    input_len: u32,
-    params_ptr: u32,
-    params_len: u32,
-    _out_ptr: u32,
-    _out_len_ptr: u32,
-) -> i32 {
-    // ---- Parameter parsing (Spec.md §6, 5 bytes total) ----
-    let mut param_cursor = Cursor::new(params_ptr, params_len);
-
-    // version: u8 at offset 0. Mismatch is always rejected, never coerced.
-    let version: u8 = match param_cursor.read_bytes(1) {
-        Ok(v) => v[0],
-        Err(()) => return E_INVALID_PARAM,
-    };
-    if version != 0x01 {
-        return E_INVALID_PARAM;
-    }
-    // Exactly 1 bytes remain after the version byte; trailing bytes are
-    // always rejected (Spec.md §0).
-    let remaining = param_cursor.remaining();
-    if remaining > 1 {
-        return E_TRAILING_DATA;
-    }
-    if remaining < 1 {
-        return E_INVALID_PARAM;
-    }
-
-    // Do we have to create a Merkle tree, or do we just have to create
-    // a checksum for the input blob? 1 byte, 0 or 1.
-    let is_merkle: u8 = match param_cursor.read_bytes(1) {
-        Ok(v) => v[0],
-        Err(()) => return E_INVALID_PARAM,
-    };
-    if is_merkle != 0 && is_merkle != 1 {
-        return E_INVALID_PARAM;
-    }
-
-    // ---- Digest / Merkleization (Spec.md §6, steps 1-3) ----
-    if is_merkle == 0 {
-        let hash_result_ptr: u32;
-        unsafe {
-            hash_result_ptr = alloc(96);
-        }
-        let num_full_block = input_len / 31;
-        let padding: u32 = input_len % 31;
-        for indx in 0..num_full_block {
-            unsafe {
-                let current_block_ptr = input_ptr + (indx * 31);
-                let mut hashing_mem = core::slice::from_raw_parts_mut(hash_result_ptr as *mut u8, 96);
-                let block = core::slice::from_raw_parts(current_block_ptr as *const u8, 31);
-                
-                let current = Fr::from_be_bytes_mod_order(&hashing_mem[0..32]);
-                let incoming = Fr::from_be_bytes_mod_order(block);
-                let sum = current + incoming;
-                let sum_bigint = BigInt::from(sum);
-                hashing_mem[0..32].copy_from_slice(&sum_bigint.to_bytes_be());
-                match poseidon_one_pass(hash_result_ptr, 96, hash_result_ptr) {
-                    Ok(()) => {}
-                    Err(()) => return E_INVALID_PARAM,
-                }
-            }
-        }
-        unsafe {
-            // The current block might need some padding.
-            // Pad it using pkcs7_pad, then hash it like the code above.
-            let block_ptr = input_ptr + (num_full_block * 31);
-            if padding > 0 {
-                // Spec.md §6 step 2: pad a short final chunk with PKCS#7,
-                // then absorb it exactly like the full-block loop above.
-                let block_slice = core::slice::from_raw_parts(block_ptr as *const u8, padding as usize);
-                let padded: [u8; 31] = pkcs7_pad(block_slice);
-                let mut hashing_mem = core::slice::from_raw_parts_mut(hash_result_ptr as *mut u8, 96);
-                let current = Fr::from_be_bytes_mod_order(&hashing_mem[0..32]);
-                let incoming = Fr::from_be_bytes_mod_order(&padded);
-                let sum = current + incoming;
-                let sum_bigint = BigInt::from(sum);
-                hashing_mem[0..32].copy_from_slice(&sum_bigint.to_bytes_be());
-                match poseidon_one_pass(hash_result_ptr, 96, hash_result_ptr) {
-                    Ok(()) => {}
-                    Err(()) => return E_INVALID_PARAM,
-                }
-            }
-        }
-    }
-    
-    return E_OK;
-}
